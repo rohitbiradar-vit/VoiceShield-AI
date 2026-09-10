@@ -8,10 +8,13 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 
 class WebSocketManager(
-    private val serverUrl: String = "ws://192.168.0.106:8000/ws/room1",
+    private var serverUrl: String = "ws://10.20.13.184:8000/ws/room1",
     private val onMessage: (String) -> Unit,
     private val onConnectionState: ((String) -> Unit)? = null
 ) {
@@ -30,7 +33,29 @@ class WebSocketManager(
     @Volatile
     private var connected = false
 
+    @Volatile
+    private var manualDisconnect = false
+
+    private val scheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
+    private var retryFuture: ScheduledFuture<*>? = null
+
     fun isConnected(): Boolean = connected
+
+    fun getServerUrl(): String = serverUrl
+
+    fun updateServerUrl(newUrl: String) {
+        Log.d(TAG, "Updating server URL to $newUrl")
+        serverUrl = newUrl
+        reconnect()
+    }
+
+    fun reconnect() {
+        Log.d(TAG, "Reconnecting WebSocket to $serverUrl...")
+        cancelRetry()
+        disconnect()
+        manualDisconnect = false
+        connect()
+    }
 
     fun connect() {
         if (connected && webSocket != null) {
@@ -38,7 +63,10 @@ class WebSocketManager(
             return
         }
 
+        cancelRetry()
+        manualDisconnect = false
         Log.d(TAG, "Connecting to $serverUrl...")
+        onConnectionState?.invoke("CONNECTING")
 
         val request = Request.Builder()
             .url(serverUrl)
@@ -51,6 +79,7 @@ class WebSocketManager(
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     Log.d(TAG, "WebSocket CONNECTED to $serverUrl")
                     connected = true
+                    cancelRetry()
                     onConnectionState?.invoke("CONNECTED")
                 }
 
@@ -67,6 +96,7 @@ class WebSocketManager(
                     Log.e(TAG, "WebSocket ERROR: ${t.message}", t)
                     connected = false
                     onConnectionState?.invoke("FAILED")
+                    scheduleRetry()
                 }
 
                 override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -79,9 +109,29 @@ class WebSocketManager(
                     Log.d(TAG, "WebSocket CLOSED: $code / $reason")
                     connected = false
                     onConnectionState?.invoke("DISCONNECTED")
+                    if (!manualDisconnect) {
+                        scheduleRetry()
+                    }
                 }
             }
         )
+    }
+
+    private fun scheduleRetry() {
+        if (manualDisconnect) return
+        cancelRetry()
+        Log.d(TAG, "Scheduling auto-reconnect in 4 seconds...")
+        retryFuture = scheduler.schedule({
+            if (!connected && !manualDisconnect) {
+                Log.d(TAG, "Auto-reconnect timer fired. Retrying connection to $serverUrl...")
+                connect()
+            }
+        }, 4, TimeUnit.SECONDS)
+    }
+
+    private fun cancelRetry() {
+        retryFuture?.cancel(true)
+        retryFuture = null
     }
 
     fun sendMessage(message: String) {
@@ -99,6 +149,8 @@ class WebSocketManager(
 
     fun disconnect() {
         Log.d(TAG, "Disconnecting WebSocket...")
+        manualDisconnect = true
+        cancelRetry()
         connected = false
         try {
             webSocket?.close(1000, "VoiceShield clean close")

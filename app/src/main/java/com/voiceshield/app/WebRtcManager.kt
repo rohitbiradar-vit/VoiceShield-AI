@@ -115,8 +115,12 @@ class WebRtcManager(
                         Log.e(TAG, "WebRTC AudioTrack error: $errorMessage")
                     }
                 })
-                .setSamplesReadyCallback { audioSamples ->
-                    // Official WebRTC audio tap callback. Direct raw PCM bytes from the call capture.
+                .setSamplesReadyCallback { _ ->
+                    // Local microphone capture: strictly excluded from voice-cloning detection.
+                    // Each phone only feeds the incoming remote peer's voice (AudioTrack) to the AI model.
+                }
+                .setPlaybackSamplesReadyCallback { audioSamples ->
+                    // Official WebRTC audio tap callback: incoming remote peer voice from AudioTrack/speaker
                     onAudioSampleCaptured?.invoke(
                         audioSamples.data,
                         audioSamples.sampleRate,
@@ -181,8 +185,11 @@ class WebRtcManager(
 
         return try {
             val iceServers = listOf(
-                PeerConnection.IceServer.builder("stun:stun.l.google.com:19302")
-                    .createIceServer()
+                PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
+                PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
+                PeerConnection.IceServer.builder("stun:stun2.l.google.com:19302").createIceServer(),
+                PeerConnection.IceServer.builder("stun:stun.cloudflare.com:3478").createIceServer(),
+                PeerConnection.IceServer.builder("stun:openrelay.metered.ca:80").createIceServer()
             )
 
             val rtcConfig = PeerConnection.RTCConfiguration(iceServers).apply {
